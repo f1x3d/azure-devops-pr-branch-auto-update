@@ -1,0 +1,84 @@
+# Auto-update PR branches with the latest target branch changes
+# Version: 1.0
+# Source: https://github.com/f1x3d/azure-devops-pr-branch-auto-update
+
+trigger:
+  batch: true
+  branches:
+    include:
+    - '*'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+- checkout: self
+  clean: true
+  persistCredentials: true
+
+- pwsh: |
+    Write-Host '##[command]git config user.email "pipeline@localhost"'
+    git config user.email "pipeline@localhost"
+
+    Write-Host '##[command]git config user.name "Automated Workflow"'
+    git config user.name "Automated Workflow"
+    
+    $TargetBranchName = "$(Build.SourceBranch)".replace('refs/heads/', '')
+
+    Write-Host "##[command]git fetch origin $TargetBranchName --depth=2147483647"
+    git fetch origin $TargetBranchName --depth=2147483647
+    
+    Write-Host "##[command]git checkout $TargetBranchName"
+    git checkout $TargetBranchName
+
+    $PrCommentRequestBody = @{
+      comments = @(
+        @{
+          content = "Please resolve merge conflicts"
+          commentType = "text"
+        }
+      )
+      status = "active"
+    } | ConvertTo-Json
+
+    $PullRequests = Invoke-RestMethod `
+      -Method Get `
+      -Uri '$(System.CollectionUri)$(System.TeamProject)/_apis/git/repositories/$(Build.Repository.Name)/pullrequests?searchCriteria.targetRefName=$(Build.SourceBranch)&api-version=7.0' `
+      -Authentication Bearer `
+      -Token (ConvertTo-SecureString $Env:SYSTEM_ACCESSTOKEN -AsPlainText -Force)
+    
+    foreach ($PullRequest in $PullRequests.value | where isDraft -eq $False)
+    {
+      $SourceBranchName = $PullRequest.sourceRefName.replace('refs/heads/', '')
+
+      Write-Host "##[command]git fetch origin $SourceBranchName --depth=2147483647"
+      git fetch origin $SourceBranchName --depth=2147483647
+      
+      Write-Host "##[command]git checkout $SourceBranchName"
+      git checkout $SourceBranchName
+      
+      Write-Host "##[command]git merge $TargetBranchName"
+      git merge $TargetBranchName
+
+      if ($?)
+      {
+        Write-Host '##[command]git push origin'
+        git push origin
+      }
+      else
+      {
+        Write-Host '##[command]git merge --abort'
+        git merge --abort
+
+        Invoke-RestMethod `
+          -Method Post `
+          -Uri "$(System.CollectionUri)/$(System.TeamProject)/_apis/git/repositories/$(Build.Repository.Name)/pullrequests/$($PullRequest.pullRequestId)/threads?api-version=7.0" `
+          -Authentication Bearer `
+          -Token (ConvertTo-SecureString $Env:SYSTEM_ACCESSTOKEN -AsPlainText -Force) `
+          -ContentType "application/json" `
+          -Body $PrCommentRequestBody
+      }
+    }
+  displayName: Merge changes into the open PRs
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
